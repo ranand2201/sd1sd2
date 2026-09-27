@@ -7,7 +7,7 @@ funnel like `vwappiercing_options`; the pierce itself is the entry.
 
 - **BUY**: price pierces below `VWAP - 2SD` (oversold) -> buy a CE, expecting reversion up.
 - **SELL**: price pierces above `VWAP + 2SD` (overbought) -> buy a PE, expecting reversion down.
-- **SL**: `sl_sd_multiplier` (default 3) SD beyond entry, in the adverse direction.
+- **SL**: `sl_sd_multiplier` (default 4) SD beyond entry, in the adverse direction.
 - **Exit1**: `exit1_sd_multiplier` (default 1) SD from VWAP, in the trade's favor.
 - **Exit2**: VWAP itself (multiplier 0) -- full reversion.
 
@@ -21,6 +21,28 @@ stays open. Exit2 is always "wherever VWAP is right now", not a price frozen at 
 
 Any trade still open at `force_exit_time` is force-closed at the prevailing price regardless of
 SL/Exit1/Exit2 state.
+
+**Everything is checked on the main-interval candle series only** (5-min, per the `VWAPSD1SD2`
+sheet's `Config` tab) -- there's no separate 1-min series anywhere, unlike `vwappiercing_options`.
+In BACKTEST/LIVE-test-mode replay, entry and SL/Exit1/Exit2 hits are both range-checks (High/Low
+touching the level) against that same candle series; in real LIVE they're point-checks against the
+live LTP between candle closes. A level is always computed from the candles closed *strictly
+before* the one being checked (see `__bands_at`), so a candle's own not-yet-closed VWAP/SD is never
+used to judge itself.
+
+### Reentry cooldown after a stop-out
+
+Without a cooldown, a direction that's stopped out (SL) while price is still sitting beyond the
+entry band would re-enter on literally the next candle, since the 2SD pierce condition is still
+true -- during a stretch that isn't actually reverting, this produces a rapid string of SL-after-SL
+trades on the same side. To prevent that: once a direction is stopped out, it's marked
+**reentry-blocked** and won't be checked for a new entry again until price first pulls back to
+within `reentry_sd_threshold` SD of VWAP (default 1) -- see `pattern_rules.reentry_cleared()`. Only
+an SL close sets this; a winning Exit1/Exit2 close re-arms the direction immediately, since there's
+no whipsaw to guard against there. Each direction (BUY/SELL) tracks its own cooldown independently.
+While blocked, the seeking-entry log line is replaced with an explicit
+`"reentry blocked after SL -- waiting for price to pull back within <N>SD of VWAP"` line, and a
+`"reentry cooldown cleared"` line marks the moment it re-arms.
 
 ## Configuration (`Config/strategy_config.json`)
 
@@ -38,6 +60,7 @@ missing file or missing keys fall back to hardcoded defaults -- it can never cra
 | `entry_sd_multiplier` | Entry band, in SD from VWAP |
 | `exit1_sd_multiplier` | Exit1 band, in SD from VWAP |
 | `sl_sd_multiplier` | SL band, in SD from VWAP (beyond entry, adverse direction) |
+| `reentry_sd_threshold` | After an SL stop-out, how close (in SD from VWAP) price must pull back to before that direction re-arms for a new entry |
 | `option_premium_band_low`/`high` | Target option premium range for strike selection |
 | `index_name`, `strike_step` | Underlying index and its option strike spacing |
 | `test_mode_start_time`, `test_mode_step_seconds` | LIVE test mode's simulated clock |

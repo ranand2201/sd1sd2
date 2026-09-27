@@ -1,1 +1,83 @@
-# sd1sd2
+# SD1SD2
+
+VWAP-mean-reversion strategy on the NIFTY future: VWAP is treated as the market's equilibrium, so
+price pierced `entry_sd_multiplier` (default 2) standard deviations away from it is the entry
+signal, expecting reversion back toward VWAP. Single-stage entry -- no piercing/reclaim/confirm
+funnel like `vwappiercing_options`; the pierce itself is the entry.
+
+- **BUY**: price pierces below `VWAP - 2SD` (oversold) -> buy a CE, expecting reversion up.
+- **SELL**: price pierces above `VWAP + 2SD` (overbought) -> buy a PE, expecting reversion down.
+- **SL**: `sl_sd_multiplier` (default 3) SD beyond entry, in the adverse direction.
+- **Exit1**: `exit1_sd_multiplier` (default 1) SD from VWAP, in the trade's favor.
+- **Exit2**: VWAP itself (multiplier 0) -- full reversion.
+
+SD here means the rolling standard deviation of `(Close - VWAP)` over `sd_period` main-interval
+candles, **not** a classic Bollinger band (which is stdev of Close around its own SMA) -- see
+`Logic/pattern_rules.py::compute_sd`.
+
+**All three levels are dynamic**, unlike `vwappiercing_options`' SL/Exit-1..3 (fixed at entry):
+SL/Exit1/Exit2 are recomputed from the CURRENT VWAP/SD on every check, for as long as the trade
+stays open. Exit2 is always "wherever VWAP is right now", not a price frozen at entry time.
+
+Any trade still open at `force_exit_time` is force-closed at the prevailing price regardless of
+SL/Exit1/Exit2 state.
+
+## Configuration (`Config/strategy_config.json`)
+
+The single source of truth for every tunable trading parameter, shared identically by LIVE and
+BACKTEST (`Config/config_loader.py::load_config()`, applied via `pattern_rules.configure()`). A
+missing file or missing keys fall back to hardcoded defaults -- it can never crash the strategy.
+
+| Key | Meaning |
+|---|---|
+| `day_start_time` | Session start used for backtest/test-mode option lookups |
+| `entry_start_delay_minutes` | Minutes after execution start before VWAP/SD are trusted enough to seek entries |
+| `entry_cutoff_time` | Stop seeking new entries after this time |
+| `force_exit_time` | Force-close any open trade at this time regardless of exit state |
+| `sd_period` | Rolling window (in main-interval candles) for the stdev of (Close-VWAP) |
+| `entry_sd_multiplier` | Entry band, in SD from VWAP |
+| `exit1_sd_multiplier` | Exit1 band, in SD from VWAP |
+| `sl_sd_multiplier` | SL band, in SD from VWAP (beyond entry, adverse direction) |
+| `option_premium_band_low`/`high` | Target option premium range for strike selection |
+| `index_name`, `strike_step` | Underlying index and its option strike spacing |
+| `test_mode_start_time`, `test_mode_step_seconds` | LIVE test mode's simulated clock |
+| `historical_option_lookup_delay_seconds` | Pacing between historical option-price lookups (rate-limit avoidance) |
+| `live_trading_enabled` | Master safety switch for real order placement (default `false`) |
+| `target_exit` | Which of `"exit1"`/`"exit2"` also closes the position for real, alongside SL. `null` = SL only |
+| `order.*` | order_type/product_type/lot_size/lot_count for real orders |
+
+### Real order placement
+
+Off by default (`live_trading_enabled: false`) -- LIVE runs fully paper-trade, logging every
+setup/trade to `PaperTradeData` exactly as before. Set it to `true` to place real entry BUY / exit
+SELL orders. SL is always a real exit once enabled; `target_exit` additionally makes Exit1 or
+Exit2 real too, so the position closes on whichever hits first. Every order attempt (entry or
+exit, success or failure) is logged to `OrderLog` as its own row. LIVE test mode
+(`executor.py --test_mode true --date YYYY-MM-DD`) never places real orders regardless of this
+setting -- it's a safe rehearsal of the live code path against historical data.
+
+## Layout
+
+```
+sd1sd2/
+  Config/
+    strategy_config.json
+    config_loader.py
+  DataTypes/
+    trade_data.py       # sd1sd2_trade_row, candle_snapshot, exit_hit, eod_exit
+    order_log_data.py
+  Logic/
+    pattern_rules.py     # SD-band math, entry window timing, front-month future resolution
+    sd1sd2_engine.py      # the shared LIVE/BACKTEST state machine
+    sd1sd2.py             # LIVE entry point
+    backtest_engine.py    # BACKTEST entry point
+    option_selection.py
+  UserInterface/
+    adapter/...           # login/config adapters (gsheet-backed)
+    gsheet/...             # login, config, paper_trade, backtest, order_log sheet writers
+  interfaces.py           # ILogicInterface registered in executor.py's LOGIC_REGISTRY as "sd1sd2"
+  run_backtest.py
+```
+
+Google Sheet: `VWAPSD1SD2`, tabs `Config` / `BrokerData` / `PaperTradeData` / `BackTestData` /
+`OrderLog` -- same tab layout convention as `vwappiercing_options`' `VWAPPiercingOptions` sheet.

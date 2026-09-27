@@ -1,0 +1,36 @@
+{
+  "day_start_time": "09:15:00",
+  "entry_start_delay_minutes": 15,
+  "entry_cutoff_time": "14:00:00",
+  "force_exit_time": "14:50:00",
+
+  "_comment_sd_bands": "SD bands = current VWAP +/- multiplier * rolling stdev of (Close - VWAP) over sd_period main-interval candles. All three levels float with VWAP/SD for as long as a trade is open.",
+  "sd_period": 20,
+  "entry_sd_multiplier": 2.0,
+  "exit1_sd_multiplier": 1.0,
+  "sl_sd_multiplier": 4.0,
+
+  "_comment_reentry_sd_threshold": "After a stop-out (SL), a direction won't re-arm for a new entry until price has pulled back to within this many SD of VWAP -- prevents immediate re-entry while still beyond the band during a non-reverting move. Does not apply after a winning target-exit close.",
+  "reentry_sd_threshold": 1.0,
+
+  "option_premium_band_low": 80.0,
+  "option_premium_band_high": 130.0,
+  "index_name": "NIFTY",
+  "strike_step": 50,
+  "test_mode_start_time": "09:16:15",
+  "test_mode_step_seconds": 60,
+  "historical_option_lookup_delay_seconds": 0.5,
+
+  "_comment_live_trading_enabled": "Master safety switch. Must be explicitly set to true for LIVE mode to place any real order. false (default) keeps LIVE fully paper-trade.",
+  "live_trading_enabled": false,
+
+  "_comment_target_exit": "Which of Exit1(1SD)/Exit2(VWAP) ALSO closes the real position for real, in addition to SL (SL is always a real exit regardless of this setting). One of: null, \"exit1\", \"exit2\". null means SL is the only real exit.",
+  "target_exit": null,
+
+  "order": {
+    "order_type": "MARKET",
+    "product_type": "MIS",
+    "lot_size": 75,
+    "lot_count": 1
+  }
+}

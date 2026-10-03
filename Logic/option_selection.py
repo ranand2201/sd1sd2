@@ -42,6 +42,12 @@ def select_cheapest_in_band(chain_df, option_type, band_low=80.0, band_high=130.
     the option_type filter below. Only ever considers contracts strictly inside [band_low, band_high]
     and picks the lowest-premium (cheapest) one among them. Returns (symbol, price), or (None, 0.0)
     if the chain is empty/missing or nothing in the band qualifies.
+
+    NOTE: deliberately unused by SD1SD2Engine (see select_closest_to_atm_in_band below) --
+    "cheapest" biases toward far-OTM, low-delta contracts whose premium barely responds to the
+    modest SD-sized moves this strategy targets, so a correct directional call on the future can
+    still lose money on the option (theta/IV noise dominates a low-delta contract's P&L). Kept here
+    since it's still a reasonable choice for a strategy that doesn't care about delta/moneyness.
     """
     if chain_df is None or len(chain_df) == 0:
         return None, 0.0
@@ -54,4 +60,33 @@ def select_cheapest_in_band(chain_df, option_type, band_low=80.0, band_high=130.
         return None, 0.0
 
     best_row = candidates.loc[candidates[ltp_col].idxmin()]
+    return str(best_row[symbol_col]), float(best_row[ltp_col])
+
+
+def select_closest_to_atm_in_band(chain_df, option_type, atm_strike, band_low=80.0, band_high=130.0,
+                                  symbol_col="symbol", type_col="option_type", ltp_col="ltp",
+                                  strike_col="strike_price"):
+    """
+    Same candidate filtering as select_cheapest_in_band (option_type match, premium inside
+    [band_low, band_high]), but picks the contract whose strike is CLOSEST to atm_strike instead of
+    the cheapest one -- i.e. the highest-delta contract the premium band still allows. A strike
+    nearer the money responds much more to the underlying's actual move, which matters here because
+    this strategy's SD-based exits are sized off the FUTURE's price action, not the option's --
+    a far-OTM "cheap" contract can see its premium dominated by theta/IV noise even when the
+    underlying move is exactly right. Returns (symbol, price), or (None, 0.0) if the chain is
+    missing/empty, lacks a strike column, or nothing in the band qualifies.
+    """
+    if chain_df is None or len(chain_df) == 0:
+        return None, 0.0
+    required = (type_col, ltp_col, symbol_col, strike_col)
+    if any(col not in chain_df.columns for col in required):
+        return None, 0.0
+
+    candidates = chain_df[(chain_df[type_col] == option_type) &
+                          (chain_df[ltp_col] >= band_low) & (chain_df[ltp_col] <= band_high)]
+    if candidates.empty:
+        return None, 0.0
+
+    distance = (candidates[strike_col] - atm_strike).abs()
+    best_row = candidates.loc[distance.idxmin()]
     return str(best_row[symbol_col]), float(best_row[ltp_col])

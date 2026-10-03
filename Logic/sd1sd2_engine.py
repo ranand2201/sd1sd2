@@ -44,7 +44,7 @@ from ..UserInterface.gsheet.paper_trade.paper_trade import *
 from ..UserInterface.gsheet.order_log.order_log import *
 from ..Config.config_loader import load_config
 from . import pattern_rules
-from .option_selection import select_cheapest_in_band
+from .option_selection import select_closest_to_atm_in_band
 
 # Which sd1sd2_trade_row exit_hit field + display label each Config/strategy_config.json
 # "target_exit" value maps to. None/unrecognized -> SL is the only real exit.
@@ -726,48 +726,60 @@ class SD1SD2Engine(ILogic):
         ))
         return success, order_id
 
-    def __select_option_by_premium(self, broker, option_type):
+    def __select_option_by_premium(self, broker, option_type, entry_future_price):
+        # Closest-to-ATM-in-band, not cheapest-in-band: a cheap/far-OTM contract's premium is
+        # dominated by theta/IV noise and barely responds to the modest SD-sized moves this
+        # strategy targets on the future, so a correct directional call can still lose money on the
+        # option. The strike nearest the money (while still inside the premium band) has more
+        # delta, so its premium actually tracks the underlying move that triggered the trade.
         underlying = CHAIN_UNDERLYING_SYMBOL.get(self.index_name, self.index_name)
         chain_df, _, _ = broker.getOptionChain(underlying)
-        return select_cheapest_in_band(chain_df, option_type, self.target_premium_low, self.target_premium_high)
+        atm_strike = round(entry_future_price / self.strike_step) * self.strike_step
+        return select_closest_to_atm_in_band(chain_df, option_type, atm_strike,
+                                             self.target_premium_low, self.target_premium_high)
 
     def __select_historical_option(self, entry_future_price, option_type, ts):
+        """
+        BACKTEST only: scans candidate strikes OUTWARD from ATM (0, -1, +1, -2, +2, ...) and stops
+        at the first one whose historical close falls inside the premium band -- i.e. the
+        closest-to-ATM (highest-delta) contract the band allows, same selection criterion LIVE uses
+        via select_closest_to_atm_in_band, not "cheapest" (see that function's docstring for why
+        cheapest is the wrong criterion for this strategy).
+
+        A miss on any ONE strike (no data, or the broker's own "Invalid symbol" response) is NOT
+        treated as proof the whole expiry is delisted -- confirmed in practice: a single strike can
+        come back with a flaky/invalid response while neighboring strikes of the identical contract
+        resolve fine moments later in the same run. So every candidate is tried; only after the
+        entire range comes up empty is "no option data" reported.
+        """
         atm_strike = round(entry_future_price / self.strike_step) * self.strike_step
         trade_date = datetime.strptime(self.trade_date_str, "%Y-%m-%d")
         weekly_expiry = generate_weekly_expiry_dates(trade_date, 1)[0]
         is_month_expiry = weekly_expiry in generate_monthly_expiry_dates(trade_date, 1)
 
-        probe_symbol = self.broker.get_option_name(self.index_name, weekly_expiry, is_month_expiry, str(atm_strike), option_type)
-        probe_price = self.__historical_option_close_near(probe_symbol, ts)
-        if probe_price is None:
-            self.__log(f"[{ts}] No historical option data available for expiry {weekly_expiry} "
-                      f"(likely delisted) -- skipping the rest of the strike scan for this trade")
-            return None, 0.0
-
-        # A heartbeat, not a per-request dump: each of the 41 lookups below can silently retry
-        # several times against the broker (rate-limit backoff) before returning, so with no
-        # progress signal at all a healthy-but-slow scan is indistinguishable from a hung one.
-        self.__log(f"[{ts}] ({option_type}) resolving option for entry -- scanning up to 41 strikes "
-                  f"around ATM {atm_strike} (expiry {weekly_expiry})")
+        # A heartbeat, not a per-request dump: each lookup below can silently retry several times
+        # against the broker (rate-limit backoff) before returning, so with no progress signal at
+        # all a healthy-but-slow scan is indistinguishable from a hung one.
+        self.__log(f"[{ts}] ({option_type}) resolving option for entry -- scanning outward from ATM "
+                  f"{atm_strike} for the first in-band strike (expiry {weekly_expiry})")
         scan_start = time.time()
 
-        best_symbol, best_price = None, 0.0
-        for i, offset in enumerate(range(-20, 21), start=1):
+        offsets = [0] + [offset for d in range(1, 21) for offset in (-d, d)]
+        for i, offset in enumerate(offsets, start=1):
             strike = atm_strike + offset * self.strike_step
-            if offset == 0:
-                symbol, price = probe_symbol, probe_price
-            else:
-                symbol = self.broker.get_option_name(self.index_name, weekly_expiry, is_month_expiry, str(strike), option_type)
-                price = self.__historical_option_close_near(symbol, ts)
+            symbol = self.broker.get_option_name(self.index_name, weekly_expiry, is_month_expiry, str(strike), option_type)
+            price = self.__historical_option_close_near(symbol, ts)
             if i % 10 == 0:
                 self.__log(f"[{ts}] ...still scanning ({i}/41 strikes checked, "
                           f"{time.time() - scan_start:.0f}s elapsed)")
             if price is None or price <= 0:
                 continue
             if self.target_premium_low <= price <= self.target_premium_high:
-                if best_symbol is None or price < best_price:
-                    best_symbol, best_price = symbol, price
-        return best_symbol, best_price
+                return symbol, price
+        self.__log(f"[{ts}] No option found in {self.target_premium_low:.0f}-{self.target_premium_high:.0f} band "
+                  f"for expiry {weekly_expiry} after checking all {len(offsets)} candidate strikes "
+                  f"(contract may be delisted, or none traded in that band yet)")
+        return None, 0.0
 
     def __historical_option_close_near(self, option_symbol, ts):
         if not option_symbol:
@@ -850,7 +862,7 @@ class SD1SD2Engine(ILogic):
         option_type = "CE" if ds.direction == "BUY" else "PE"
         if self.mode == Mode.LIVE and not self.test_mode:
             broker = self.trade_utility.get_broker_utility()
-            option_symbol, option_price = self.__select_option_by_premium(broker, option_type)
+            option_symbol, option_price = self.__select_option_by_premium(broker, option_type, entry_future_price)
             if option_symbol is None:
                 print(self.logic_name, f": ({ds.direction}) No option found near target premium band; dropping setup")
                 return

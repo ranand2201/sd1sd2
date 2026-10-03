@@ -30,6 +30,24 @@ live LTP between candle closes. A level is always computed from the candles clos
 before* the one being checked (see `__bands_at`), so a candle's own not-yet-closed VWAP/SD is never
 used to judge itself.
 
+### Option strike selection: closest-to-ATM-in-band, not cheapest
+
+Within `option_premium_band_low/high`, the engine picks the strike **closest to ATM**, not the
+cheapest one (`Logic/option_selection.py::select_closest_to_atm_in_band` for LIVE,
+`__select_historical_option`'s outward-from-ATM scan for BACKTEST). A cheap/far-OTM contract is
+low-delta -- its premium barely responds to the modest SD-sized moves this strategy targets on the
+future, so a correct directional call can still show up as an option *loss*, dominated by theta
+decay/IV noise instead of the underlying move. Closest-to-ATM-in-band trades some premium cheapness
+for a contract whose price actually tracks the future. The BACKTEST scan tries candidates outward
+from ATM (0, -1, +1, -2, +2, ...) and stops at the first in-band one it finds, which also tends to
+be faster than scanning all ~41 for the cheapest.
+
+A single strike's lookup failing (no data, or the broker reporting "Invalid symbol") is **not**
+treated as proof the whole expiry is delisted -- confirmed in practice, a strike can come back
+flaky while a neighboring strike of the identical contract resolves fine moments later in the same
+run. Every candidate in the scan range is tried regardless of earlier misses; "no option found in
+band" is only reported once the entire range comes up empty.
+
 ### Reentry cooldown after a stop-out
 
 Without a cooldown, a direction that's stopped out (SL) while price is still sitting beyond the
